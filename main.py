@@ -18,22 +18,22 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "simulation":
-        print("[INFO] Iniciando pipeline en MODO SIMULACIÓN...")
+        print("[INFO] Iniciando pipeline en MODO SIMULACIÓN")
         source = MockSDRSource(num_bins=1024, sample_rate_mhz=2.0, integration_time_s=5.0)
     else:
-        raise NotImplementedError(
-            "El modo 'live' requiere enlazar HackRF/ZMQ en src/acquisition/hackrf_source.py"
-        )
-    for i in range(3):
-        raw_block = source.read_spectrum()
-        ui_packet = process_hi_spectrum(raw_block)
-        resumen = ui_packet.to_dict()["metricas"]
+        from src.acquisition.hackrf_source import HackRFSource
+        print("pipeline en MODO EN VIVO (ZMQ <- GNU Radio)...")
+        source = HackRFSource(num_bins=1024, sample_rate_mhz=2.0, integration_time_s=5.0)
 
-        print(f"\n--- Frame #{i + 1} ({ui_packet.timestamp}) ---")
-        print(f"Muestras espectrales: {len(ui_packet.frequencies_mhz)} puntos")
-        print(f"Métricas calculadas : {json.dumps(resumen, indent=2)}")
-        time.sleep(0.5)
-
+    print("Streaming de datos en curso")
+    try:
+        while True:
+            raw_block = source.read_spectrum()
+            ui_packet = process_hi_spectrum(raw_block)
+            print(f"[{ui_packet.timestamp}] Pico Vel: {ui_packet.metrics.peak_radial_velocity_kms} km/s | SNR: {ui_packet.metrics.snr_db} dB")
+    except KeyboardInterrupt:
+        print("\n[INFO] Transmision detenida.")
+        source.close()
 
 if __name__ == "__main__":
     main()
