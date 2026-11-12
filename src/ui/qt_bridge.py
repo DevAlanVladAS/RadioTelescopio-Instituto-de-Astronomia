@@ -30,7 +30,7 @@ from src.physics.hi_calculator import process_hi_spectrum
 class RecordedNPZSource:
     """
     Reproduce en bucle continuo una grabación real previa (.npz) capturada con el HackRF.
-    Ideal para demostraciones con alta interferencia externa (Noche de las Estrellas).
+    Esta pensado para usar con una grabacion controlada mas que para usar en vivo por si hay mucha interferencia.
     """
 
     def __init__(self, npz_path: Path, integration_time_s: float = 5.0):
@@ -49,7 +49,7 @@ class RecordedNPZSource:
         base_frame = self.frames[self.idx % len(self.frames)].copy()
         self.idx += 1
 
-        # Si el archivo tiene un solo espectro base, añadimos micro-variación térmica realista
+        # Si el archivo tiene un solo espectro base, añadimos micro-variación 
         if len(self.frames) == 1:
             base_frame += self.rng.normal(0.0, 0.35, size=base_frame.shape)
 
@@ -68,7 +68,7 @@ class RecordedNPZSource:
 
 
 class SpectrumAcquisitionWorker(QThread):
-    """Hilo de adquisición conectado a la interfaz PyQt de Katia."""
+    """Hilo de adquisición conectado con PyQt"""
 
     packet = pyqtSignal(dict)       # Emite el diccionario del contrato UIFramePacket
     state = pyqtSignal(str, str)    # Claves: CONECTANDO | EN_VIVO | INTEGRANDO | ERROR
@@ -107,11 +107,11 @@ class SpectrumAcquisitionWorker(QThread):
                 self.start()
 
     def pause(self, paused: Optional[bool] = None) -> None:
-        """Conectar al botón 'Pausar' de la barra inferior."""
+        """Conectar al boton 'Pausar'"""
         self._paused = (not self._paused) if paused is None else bool(paused)
 
     def stop(self) -> None:
-        """Conectar al botón 'Detener'."""
+        """Conectar al boton 'Detener'."""
         self._running = False
         self._paused = False
         self.wait(2000)
@@ -137,7 +137,7 @@ class SpectrumAcquisitionWorker(QThread):
                     source = RecordedNPZSource(self.recording_path, integration_time_s=self.integration_time_s)
                     modo_label = "Grabación HI Previa"
                 else:
-                    self.state.emit("CONECTANDO", "Inicializando modelo sintético de hidrógeno neutro (21 cm)...")
+                    self.state.emit("CONECTANDO", "Inicializando modelo de hidrógeno neutro")
                     source = MockSDRSource(
                         num_bins=1024,
                         sample_rate_mhz=2.0,
@@ -153,7 +153,7 @@ class SpectrumAcquisitionWorker(QThread):
                 raw_block = source.read_spectrum()
                 raw_block.integration_time_s = self.integration_time_s
 
-                # Buffer de integración real (~10 FPS: 1s = 10 frames, 5s = 50 frames, 15s = 150 frames)
+                # Buffer de integración (~10 FPS: 1s = 10 frames, 5s = 50 frames, 15s = 150 frames)
                 target_frames = max(1, int(self.integration_time_s * 10))
                 history_buffer.append(raw_block.power_db.copy())
                 while len(history_buffer) > target_frames:
