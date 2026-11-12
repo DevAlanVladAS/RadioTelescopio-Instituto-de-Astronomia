@@ -37,6 +37,7 @@ def process_hi_spectrum(raw_block: RawSpectrumBlock) -> UIFramePacket:
     metrics = AstroMetrics(
         peak_radial_velocity_kms=peak_vel_kms,
         peak_frequency_mhz=peak_freq_mhz,
+        peak_power_db=float(np.max(raw_block.power_db)),
         integrated_flux=integrated_flux,
         snr_db=snr_db,
     )

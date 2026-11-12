@@ -10,10 +10,6 @@ SPEED_OF_LIGHT_KMS: float = 299792.458   # Velocidad de la luz en el vacio (km/s
 
 @dataclass
 class RawSpectrumBlock:
-    """
-    Paquete que entrega el modulo de Adquisicion (Alan)
-    hacia el modulo de Fisica (Ricardo).
-    """
     timestamp: str
     mode: Literal["EN_VIVO", "SIMULACION"]
     center_freq_mhz: float
@@ -31,8 +27,9 @@ class AstroMetrics:
     """
     peak_radial_velocity_kms: float
     peak_frequency_mhz: float
-    integrated_flux: float
-    snr_db: float
+    peak_power_db: float = 0.0  #Para la tarjeta "POTENCIA ESPECTRAL DEL PICO"
+    integrated_flux: float = 0.0
+    snr_db: float = 0.0
 
 
 @dataclass
@@ -67,6 +64,7 @@ class UIFramePacket:
             "metricas": {
                 "velocidad_radial_pico_kms": round(self.metrics.peak_radial_velocity_kms, 2),
                 "frecuencia_pico_mhz": round(self.metrics.peak_frequency_mhz, 5),
+                "potencia_pico_db": round(self.metrics.peak_power_db, 2),
                 "flujo_integrado": round(self.metrics.integrated_flux, 2),
                 "snr_db": round(self.metrics.snr_db, 2),
             }
