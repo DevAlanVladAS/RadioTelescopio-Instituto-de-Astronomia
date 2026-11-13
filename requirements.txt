@@ -1,0 +1,27 @@
+# ==============================================================================
+# Dependencias de Python para RADIOASTROLAB (Línea HI - 21 cm)
+# ==============================================================================
+# NOTA PARA UBUNTU / DEBIAN:
+# Antes de instalar este archivo o correr GNU Radio, instala los paquetes
+# de sistema y drivers SDR desde apt:
+#   sudo apt update
+#   sudo apt install -y gnuradio hackrf libhackrf-dev soapysdr-tools \
+#       soapysdr-module-hackrf python3-soapysdr libportaudio2 libxcb-cursor0
+# ==============================================================================
+
+# Procesamiento numérico y científico (DSP, ajuste de baseline y exportación WAV)
+numpy>=1.26.0
+scipy>=1.12.0
+
+# Comunicación con GNU Radio (ZMQ PUB/SUB en tcp://127.0.0.1:5555)
+pyzmq>=25.1.0
+
+# Interfaz gráfica nativa (PyQt6) y graficación de alta velocidad (OpenGL/Qt)
+PyQt6>=6.6.0
+pyqtgraph>=0.13.3
+
+# Sonificación astronómica en tiempo real (requiere libportaudio2 en Ubuntu)
+sounddevice>=0.4.6
+
+# Pruebas unitarias
+pytest>=8.0.0
