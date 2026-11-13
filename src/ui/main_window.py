@@ -1,5 +1,6 @@
 import sys
 import json
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QSlider,
 )
 from src.contracts import HI_REST_FREQ_MHZ, SPEED_OF_LIGHT_KMS, RawSpectrumBlock
+from src.acquisition.hackrf_source import HackRFSource
 from src.physics.hi_calculator import process_hi_spectrum
 from src.physics.sonification import SAMPLE_RATE, generate_realtime_chunk, export_simulation_wav
 from src.ui.qt_bridge import RecordedNPZSource, SpectrumAcquisitionWorker
@@ -47,23 +49,23 @@ class ConfigurableSimulationSource:
 
     def apply_preset(self, name: str):
         cfg = self.PRESETS.get(name)
-        if cfg is None and self.npz_source is not None:
-            self.use_npz = True
+        if cfg is None:
+            if self.npz_source is not None:
+                self.use_npz = True
             return
         self.use_npz = False
-        if cfg:
-            self.vel_kms = cfg["vel_kms"]
-            self.amp_db = cfg["amp_db"]
-            self.sigma_mhz = cfg["sigma_mhz"]
-            self.noise_db = cfg["noise_db"]
+        self.vel_kms = cfg["vel_kms"]
+        self.amp_db = cfg["amp_db"]
+        self.sigma_mhz = cfg["sigma_mhz"]
+        self.noise_db = cfg["noise_db"]
 
     def read_spectrum(self) -> RawSpectrumBlock:
         if self.use_npz and self.npz_source is not None:
             return self.npz_source.read_spectrum()
 
         sdr_dome = -85.0 - 4.5 * ((self.freqs - HI_REST_FREQ_MHZ) ** 2)
-        eff_noise = self.noise_db / np.sqrt(max(1.0, self.integration_time_s / 5.0))
-        noise = np.random.normal(0.0, eff_noise, len(self.freqs))
+        # Ruido instantáneo por frame (el suavizado real de 1s/5s/15s lo hace el buffer deque de la ventana)
+        noise = np.random.normal(0.0, self.noise_db, len(self.freqs))
 
         f_center = HI_REST_FREQ_MHZ * (1.0 - self.vel_kms / SPEED_OF_LIGHT_KMS)
         hi_signal = self.amp_db * np.exp(-0.5 * ((self.freqs - f_center) / self.sigma_mhz) ** 2)
@@ -99,12 +101,23 @@ class RadioTelescopioWindow(QMainWindow):
         self.waterfall_data = np.full((self.waterfall_rows, 1024), -90.0, dtype=np.float32)
         self.integration_s = 5.0
         self.paused = False
+        self.mode = "simulation"  # "simulation" o "live"
+        self.live_source = None
+        self.history_buffer: deque = deque(maxlen=300)
 
         self.audio_enabled = False
-        self.audio_stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32")
-        self.audio_stream.start()
+        try:
+            self.audio_stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+            self.audio_stream.start()
+        except Exception:
+            self.audio_stream = None
 
-        rec_path = Path(__file__).resolve().parents[2] / "data_samples" / "grabacion_noche_estrellas.npz"
+        # Busca grabacion_noche_estrellas.npz O real_hackrf_raw_block.npz en data_samples/
+        samples_dir = Path(__file__).resolve().parents[2] / "data_samples"
+        rec_path = samples_dir / "grabacion_noche_estrellas.npz"
+        if not rec_path.exists():
+            rec_path = samples_dir / "real_hackrf_raw_block.npz"
+
         npz_src = RecordedNPZSource(rec_path, integration_time_s=self.integration_s) if rec_path.exists() else None
         self.source = ConfigurableSimulationSource(npz_source=npz_src, integration_time_s=self.integration_s)
         self.export_helper = SpectrumAcquisitionWorker(mode="simulation")
@@ -113,6 +126,8 @@ class RadioTelescopioWindow(QMainWindow):
         self.timer.timeout.connect(self.process_next_frame)
 
         self._build_ui()
+        # Si inició en el primer elemento del combo (.npz) pero quiere usar sliders o npz:
+        self.on_preset_changed(self.cmb_preset.currentText())
 
     def _build_ui(self):
         central = QWidget()
@@ -121,7 +136,6 @@ class RadioTelescopioWindow(QMainWindow):
         root.setContentsMargins(14, 8, 14, 8)
         root.setSpacing(6)
 
-        # ================= ENCABEZADO COMPACTO + COORDENADAS =================
         header = QHBoxLayout()
         header.setSpacing(10)
 
@@ -134,7 +148,6 @@ class RadioTelescopioWindow(QMainWindow):
         header.addWidget(lbl_sub)
         header.addSpacing(12)
 
-        # Coordenadas e integración integradas en cápsulas compactas
         header.addWidget(self._make_inline_pill("AR:", "18h 36m 00s"))
         header.addWidget(self._make_inline_pill("DEC:", "−08° 30′ 00″"))
         self.pill_int = self._make_inline_pill("Integración:", "5.0 s")
@@ -156,12 +169,10 @@ class RadioTelescopioWindow(QMainWindow):
         header.addWidget(self.badge_state)
         root.addLayout(header)
 
-        # ================= FILA PRINCIPAL: DOS GRÁFICAS GRANDES LADO A LADO =================
         pg.setConfigOptions(antialias=True)
         row_plots = QHBoxLayout()
         row_plots.setSpacing(8)
 
-        # --- Gráfica Izquierda: ESPECTRO DE FRECUENCIA ---
         freq_card = QFrame()
         freq_card.setObjectName("Card")
         freq_lay = QVBoxLayout(freq_card)
@@ -188,7 +199,6 @@ class RadioTelescopioWindow(QMainWindow):
         freq_lay.addWidget(self.freq_plot)
         row_plots.addWidget(freq_card)
 
-        # --- Gráfica Derecha: ESPECTRO DE VELOCIDAD RADIAL ---
         vel_card = QFrame()
         vel_card.setObjectName("Card")
         vel_lay = QVBoxLayout(vel_card)
@@ -231,14 +241,11 @@ class RadioTelescopioWindow(QMainWindow):
         vel_lay.addWidget(self.vel_plot)
         row_plots.addWidget(vel_card)
 
-        # Mayor peso vertical (stretch=5) para que las gráficas dominen la ventana
         root.addLayout(row_plots, stretch=5)
 
-        # ================= FILA DE MÉTRICAS COMPACTA =================
         row_metrics = QHBoxLayout()
         row_metrics.setSpacing(8)
 
-        # Tarjeta 1: Velocidad Radial
         c_vel = QFrame()
         c_vel.setObjectName("Card")
         l_vel = QHBoxLayout(c_vel)
@@ -261,7 +268,6 @@ class RadioTelescopioWindow(QMainWindow):
         l_vel.addWidget(self.pill_dir)
         row_metrics.addWidget(c_vel)
 
-        # Tarjeta 2: Frecuencia Detectada
         c_freq = QFrame()
         c_freq.setObjectName("Card")
         l_freq = QHBoxLayout(c_freq)
@@ -281,7 +287,6 @@ class RadioTelescopioWindow(QMainWindow):
         l_freq.addWidget(sub2)
         row_metrics.addWidget(c_freq)
 
-        # Tarjeta 3: Potencia Espectral del Pico + SNR + Flujo
         c_pwr = QFrame()
         c_pwr.setObjectName("Card")
         l_pwr = QHBoxLayout(c_pwr)
@@ -303,7 +308,6 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addLayout(row_metrics, stretch=0)
 
-        # ================= CASCADA · HISTORIAL DEL ESPECTRO (AMPLIADA) =================
         wf_card = QFrame()
         wf_card.setObjectName("Card")
         wf_lay = QVBoxLayout(wf_card)
@@ -324,10 +328,8 @@ class RadioTelescopioWindow(QMainWindow):
         self.wf_img.setColorMap(pg.colormap.get("inferno"))
         wf_lay.addWidget(self.wf_plot)
 
-        # Stretch=4 para que la cascada crezca proporcionalmente con la pantalla
         root.addWidget(wf_card, stretch=4)
 
-        # ================= PANEL DE PARÁMETROS DE SIMULACIÓN =================
         sim_card = QFrame()
         sim_card.setObjectName("Card")
         sim_lay = QHBoxLayout(sim_card)
@@ -338,6 +340,7 @@ class RadioTelescopioWindow(QMainWindow):
         lbl_esc.setStyleSheet("font-size: 11px; font-weight: bold; color: #94a3b8;")
         self.cmb_preset = QComboBox()
         self.cmb_preset.addItems(list(ConfigurableSimulationSource.PRESETS.keys()))
+        self.cmb_preset.setCurrentIndex(1)  # Iniciar en Nube acercándose por defecto
         self.cmb_preset.currentTextChanged.connect(self.on_preset_changed)
 
         self.lbl_sld_vel = QLabel("Velocidad: -43.5 km/s")
@@ -371,7 +374,6 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addWidget(sim_card, stretch=0)
 
-        # ================= CONTROLES INFERIORES =================
         controls = QHBoxLayout()
         controls.setSpacing(8)
 
@@ -438,22 +440,37 @@ class RadioTelescopioWindow(QMainWindow):
         return pill
 
     def on_preset_changed(self, name: str):
+        self.history_buffer.clear()  # Reiniciar buffer al cambiar de escenario para ver el cambio al instante
         self.source.apply_preset(name)
-        if not self.source.use_npz:
-            self.sld_vel.blockSignals(True)
-            self.sld_amp.blockSignals(True)
-            self.sld_noise.blockSignals(True)
-            self.sld_vel.setValue(int(round(self.source.vel_kms)))
-            self.sld_amp.setValue(int(round(self.source.amp_db)))
-            self.sld_noise.setValue(int(round(self.source.noise_db * 10)))
-            self.sld_vel.blockSignals(False)
-            self.sld_amp.blockSignals(False)
-            self.sld_noise.blockSignals(False)
-            self.lbl_sld_vel.setText(f"Velocidad: {self.source.vel_kms:.1f} km/s")
-            self.lbl_sld_amp.setText(f"Pico HI: {self.source.amp_db:.1f} dB")
-            self.lbl_sld_noise.setText(f"Ruido: {self.source.noise_db:.2f} dB")
+
+        if self.source.use_npz:
+            self.badge_mode.setText("GRABACIÓN (.NPZ)")
+            self.sld_vel.setEnabled(False)
+            self.sld_amp.setEnabled(False)
+            self.sld_noise.setEnabled(False)
+            return
+
+        if self.mode == "simulation":
+            self.badge_mode.setText("SIMULACIÓN")
+        self.sld_vel.setEnabled(True)
+        self.sld_amp.setEnabled(True)
+        self.sld_noise.setEnabled(True)
+
+        self.sld_vel.blockSignals(True)
+        self.sld_amp.blockSignals(True)
+        self.sld_noise.blockSignals(True)
+        self.sld_vel.setValue(int(round(self.source.vel_kms)))
+        self.sld_amp.setValue(int(round(self.source.amp_db)))
+        self.sld_noise.setValue(int(round(self.source.noise_db * 10)))
+        self.sld_vel.blockSignals(False)
+        self.sld_amp.blockSignals(False)
+        self.sld_noise.blockSignals(False)
+        self.lbl_sld_vel.setText(f"Velocidad: {self.source.vel_kms:.1f} km/s")
+        self.lbl_sld_amp.setText(f"Pico HI: {self.source.amp_db:.1f} dB")
+        self.lbl_sld_noise.setText(f"Ruido: {self.source.noise_db:.2f} dB")
 
     def on_slider_changed(self):
+        self.history_buffer.clear()
         if self.source.use_npz:
             self.source.use_npz = False
         self.source.vel_kms = float(self.sld_vel.value())
@@ -496,14 +513,43 @@ class RadioTelescopioWindow(QMainWindow):
         )
 
     def switch_mode(self, mode: str):
+        self.history_buffer.clear()
         if mode == "live":
-            QMessageBox.information(
-                self,
-                "Modo En Vivo (HackRF One)",
-                "Para usar el modo En Vivo conecta el receptor HackRF One y enciende GNU Radio.\nSeguimos en modo Simulación."
-            )
+            try:
+                if self.live_source is None:
+                    self.live_source = HackRFSource(
+                        num_bins=1024,
+                        sample_rate_mhz=2.0,
+                        integration_time_s=self.integration_s,
+                    )
+                # Probar primera lectura real de ZMQ para verificar que GNU Radio está activo
+                _ = self.live_source.read_spectrum()
+                self.mode = "live"
+                self.badge_mode.setText("EN VIVO (HACKRF)")
+                self.btn_live.setObjectName("ActiveMode")
+                self.btn_sim.setObjectName("")
+                self.setStyleSheet(self.styleSheet())
+            except Exception as exc:
+                if self.live_source is not None:
+                    self.live_source.close()
+                    self.live_source = None
+                QMessageBox.warning(
+                    self,
+                    "HackRF / GNU Radio no detectado",
+                    f"No se recibió señal en tcp://127.0.0.1:5555.\n"
+                    f"Asegúrate de correr gnuradio/receptor_hi_flowgraph.py primero.\n\nDetalle: {exc}",
+                )
             return
-        self.badge_mode.setText("SIMULACIÓN")
+
+        # Modo simulación
+        if self.live_source is not None:
+            self.live_source.close()
+            self.live_source = None
+        self.mode = "simulation"
+        self.badge_mode.setText("GRABACIÓN (.NPZ)" if self.source.use_npz else "SIMULACIÓN")
+        self.btn_sim.setObjectName("ActiveMode")
+        self.btn_live.setObjectName("")
+        self.setStyleSheet(self.styleSheet())
 
     def change_integration(self, idx: int):
         valores = [1.0, 5.0, 15.0]
@@ -515,8 +561,27 @@ class RadioTelescopioWindow(QMainWindow):
         if self.paused:
             return
 
-        raw_block = self.source.read_spectrum()
+        try:
+            if self.mode == "live" and self.live_source is not None:
+                raw_block = self.live_source.read_spectrum()
+            else:
+                raw_block = self.source.read_spectrum()
+        except Exception as exc:
+            # Si GNU Radio se cierra en medio de la sesión, regresar a simulación sin crashear
+            self.switch_mode("simulation")
+            return
+
         raw_block.integration_time_s = self.integration_s
+
+        # Promediado real en buffer circular según el selector de Integración (1s=10, 5s=50, 15s=150 frames)
+        target_frames = max(1, int(self.integration_s * 10))
+        self.history_buffer.append(np.asarray(raw_block.power_db, dtype=float).copy())
+        while len(self.history_buffer) > target_frames:
+            self.history_buffer.popleft()
+
+        lin_stack = [10.0 ** (p / 10.0) for p in self.history_buffer]
+        raw_block.power_db = 10.0 * np.log10(np.mean(lin_stack, axis=0) + 1e-12)
+
         pkt = process_hi_spectrum(raw_block)
         self.export_helper.last_packet = pkt
 
@@ -529,7 +594,7 @@ class RadioTelescopioWindow(QMainWindow):
         freq_pico = m.peak_frequency_mhz
         snr = m.snr_db
         flujo = m.integrated_flux
-        pwr_pico = float(np.max(power))
+        pwr_pico = m.peak_power_db
 
         self.lbl_big_vel.setText(f"{vel_pico:.1f}")
         self.lbl_big_freq.setText(f"{freq_pico:.3f}")
@@ -550,6 +615,10 @@ class RadioTelescopioWindow(QMainWindow):
             )
         else:
             self.pill_dir.setText("● EN REPOSO")
+            self.pill_dir.setStyleSheet(
+                "border: 1px solid #10b981; color: #34d399; background-color: #064e3b; "
+                "border-radius: 5px; padding: 2px 8px; font-size: 10px; font-weight: bold;"
+            )
 
         self.freq_curve.setData(freqs, power)
         self.freq_dot.setData([freq_pico], [pwr_pico])
@@ -569,7 +638,7 @@ class RadioTelescopioWindow(QMainWindow):
         f_min, f_max = float(freqs[0]), float(freqs[-1])
         self.wf_img.setRect(f_min, 0, f_max - f_min, self.waterfall_rows)
 
-        if self.audio_enabled:
+        if self.audio_enabled and self.audio_stream is not None:
             chunk = generate_realtime_chunk(pkt, frame_duration_s=0.1)
             self.audio_stream.write(chunk)
 
@@ -582,50 +651,25 @@ class RadioTelescopioWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Exportar captura HI", "captura_hi", "Todos los archivos (*)")
         if path:
             try:
-                csv_p = f"{path}.csv"
-                data_matrix = np.column_stack((pkt.frequencies_mhz, pkt.velocities_kms, pkt.power_db))
-                np.savetxt(
-                    csv_p,
-                    data_matrix,
-                    delimiter=",",
-                    header="frequency_mhz,radial_velocity_kms,power_db",
-                    comments="",
-                )
-
-                json_p = f"{path}.json"
-                payload = {
-                    "timestamp": pkt.timestamp,
-                    "mode": pkt.mode,
-                    "center_freq_mhz": pkt.center_freq_mhz,
-                    "integration_time_s": pkt.integration_time_s,
-                    "metrics": {
-                        "peak_radial_velocity_kms": pkt.metrics.peak_radial_velocity_kms,
-                        "peak_frequency_mhz": pkt.metrics.peak_frequency_mhz,
-                        "integrated_flux": pkt.metrics.integrated_flux,
-                        "snr_db": pkt.metrics.snr_db,
-                    },
-                    "frequencies_mhz": np.asarray(pkt.frequencies_mhz).tolist(),
-                    "velocities_kms": np.asarray(pkt.velocities_kms).tolist(),
-                    "power_db": np.asarray(pkt.power_db).tolist(),
-                }
-                with open(json_p, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
-
-                wav_p = f"{path}.wav"
+                csv_p, json_p = self.export_helper.export_last_frame(path)
+                wav_p = f"{Path(path).with_suffix('')}.wav"
                 export_simulation_wav(pkt, wav_p, duration_s=4.0)
 
                 QMessageBox.information(
                     self,
                     "Exportado",
-                    f"Archivos guardados correctamente:\n• {csv_p}\n• {json_p}\n• {wav_p}",
+                    f"Archivos guardados correctamente:\n- {csv_p}\n- {json_p}\n- {wav_p}",
                 )
             except Exception as e:
                 QMessageBox.warning(self, "Aviso", str(e))
 
     def closeEvent(self, event):
         self.timer.stop()
-        self.audio_stream.stop()
-        self.audio_stream.close()
+        if self.live_source is not None:
+            self.live_source.close()
+        if self.audio_stream is not None:
+            self.audio_stream.stop()
+            self.audio_stream.close()
         event.accept()
 
 
