@@ -7,6 +7,7 @@ import numpy as np
 import pyqtgraph as pg
 import sounddevice as sd
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -129,6 +130,50 @@ class RadioTelescopioWindow(QMainWindow):
         # Si inició en el primer elemento del combo (.npz) pero quiere usar sliders o npz:
         self.on_preset_changed(self.cmb_preset.currentText())
 
+    def _build_logos_bar(self, logo_height: int = 28) -> QHBoxLayout:
+        """Carga automáticamente los logos (.png, .jpg, .jpeg, .svg) de assets/logos/."""
+        logos_layout = QHBoxLayout()
+        logos_layout.setContentsMargins(8, 0, 8, 0)
+        logos_layout.setSpacing(10)
+
+        logos_dir = Path(__file__).resolve().parents[2] / "assets" / "logos"
+        if not logos_dir.exists():
+            return logos_layout
+
+        archivos = sorted(
+            p for p in logos_dir.iterdir()
+            if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".svg")
+        )
+
+        for logo_path in archivos:
+            # Si es JPG con fondo blanco, lo convertimos a RGBA y hacemos transparente el blanco
+            if logo_path.suffix.lower() in (".jpg", ".jpeg"):
+                img = QImage(str(logo_path)).convertToFormat(QImage.Format.Format_ARGB32)
+                for y in range(img.height()):
+                    for x in range(img.width()):
+                        c = img.pixelColor(x, y)
+                        if c.red() > 235 and c.green() > 235 and c.blue() > 235:
+                            c.setAlpha(0)
+                            img.setPixelColor(x, y, c)
+                pix = QPixmap.fromImage(img)
+            else:
+                pix = QPixmap(str(logo_path))
+
+            if not pix.isNull():
+                lbl = QLabel()
+                scaled_pix = pix.scaledToHeight(
+                    logo_height, Qt.TransformationMode.SmoothTransformation
+                )
+                lbl.setPixmap(scaled_pix)
+                # Si algún logo es negro y no se ve en el fondo oscuro, cambia 'transparent' por '#f1f5f9'
+                lbl.setStyleSheet(
+                    "background-color: transparent; border-radius: 4px; padding: 2px 4px;"
+                )
+                lbl.setToolTip(logo_path.stem.lstrip("0123456789_- ").replace("_", " ").upper())
+                logos_layout.addWidget(lbl)
+
+        return logos_layout
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -154,6 +199,10 @@ class RadioTelescopioWindow(QMainWindow):
         header.addWidget(self.pill_int)
 
         header.addStretch()
+        header.addLayout(self._build_logos_bar(logo_height=26))
+        header.addStretch()
+
+        self.badge_mode = QLabel("SIMULACIÓN")
 
         self.badge_mode = QLabel("SIMULACIÓN")
         self.badge_mode.setStyleSheet(
