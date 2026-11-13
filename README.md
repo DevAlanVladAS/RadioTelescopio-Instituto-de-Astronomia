@@ -2,6 +2,37 @@
 
 Desarrollo de un pipeline de software para la captura en tiempo real, procesamiento digital de señales (DSP), análisis astrofísico y visualización espectral de la emisión de hidrógeno neutro (HI a 1420.40575 MHz). 
 
+## Instalación en Windows
+
+Desde PowerShell, en la raíz del proyecto:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Inicia la interfaz con `python main.py --ui`; el modo inicial es simulación.
+Elige `GNU Radio / HackRF` para que el botón inicie también el flowgraph.
+
+Esto instala PyQt6, PyQtGraph, NumPy, SciPy y pyzmq. GNU Radio y el soporte
+SoapySDR/HackRF se instalan por separado en un entorno compatible con GNU Radio;
+no se resuelven instalando PyQt6 con pip. Si GNU Radio está en otro entorno,
+define `GNURADIO_PYTHON` con la ruta a su `python.exe` antes de iniciar la UI.
+Por ejemplo, en PowerShell:
+
+```powershell
+$env:GNURADIO_PYTHON = "C:\ruta\al\entorno-gnuradio\python.exe"
+python main.py --ui --mode live
+```
+
+El worker de `src/ui/qt_bridge.py` puede iniciar/detener el flowgraph en modo
+`live`. Los cambios de tamaño FFT e integración se aplican al siguiente inicio,
+por lo que hay que detener la adquisición antes de cambiarlos. La calibración de
+50 Ohms se mantiene separada por tamaño FFT; si cambias la resolución, calibra
+ese tamaño antes de usar una referencia de ruido.
+
 Este proyecto se desarrolla en colaboración con el **Instituto de Astronomía de la UNAM** y **Astrolab**, con aplicación directa en divulgación científica e instrumentación astronómica para la **Noche de las Estrellas** y **Universum, Museo de las Ciencias**.
 
 ## Descripción Técnica
