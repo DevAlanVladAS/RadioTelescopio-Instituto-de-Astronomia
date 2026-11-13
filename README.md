@@ -1,8 +1,45 @@
 # Sistema de Adquisición y Procesamiento Espectral para Radiotelescopio (Línea HI - 21 cm)
 
-Desarrollo de un pipeline de software para la captura en tiempo real, procesamiento digital de señales (DSP), análisis astrofísico y visualización espectral de la emisión de hidrógeno neutro (HI a 1420.40575 MHz). 
+Desarrollo de un pipeline de software para la captura en tiempo real, procesamiento digital de señales (DSP), análisis astrofísico, sonificación y visualización espectral de la emisión de hidrógeno neutro (HI a 1420.40575 MHz).
 
-## Instalación en Windows
+Este proyecto se desarrolla en colaboración con el **Instituto de Astronomía de la UNAM** y **Astrolab**, con aplicación directa en divulgación científica e instrumentación astronómica para la **Noche de las Estrellas** y **Universum, Museo de las Ciencias**.
+
+---
+
+## Instalación y Configuración
+
+### 1. Ubuntu / Debian (Recomendado para operación con HackRF One)
+
+En Linux, **GNU Radio** y **SoapySDR** están compilados contra el Python del sistema. Para que tanto el flowgraph como la interfaz gráfica compartan acceso sin fricciones:
+
+1. **Instalar dependencias del sistema, drivers del HackRF y PortAudio (para sonificación):**
+   ```bash
+   sudo apt update
+   sudo apt install -y gnuradio hackrf libhackrf-dev soapysdr-tools \
+       soapysdr-module-hackrf python3-soapysdr python3-pip python3-venv \
+       libportaudio2 libxcb-cursor0
+   ```
+
+2. **Crear el entorno virtual heredando los paquetes de GNU Radio (`--system-site-packages`):**
+   ```bash
+   python3 -m venv --system-site-packages .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. **Verificar que el HackRF One es detectado y no está bloqueado por el kernel:**
+   ```bash
+   hackrf_info
+   ```
+   > **Solución al error `Resource busy (-1000)` en Linux:** Si al conectar el HackRF el kernel de Linux carga automáticamente el módulo DVB/V4L2 `hackrf` y bloquea el dispositivo, libéralo ejecutando:
+   > ```bash
+   > sudo modprobe -r hackrf
+   > ```
+
+---
+
+### 2. Instalación en Windows
 
 Desde PowerShell, en la raíz del proyecto:
 
@@ -13,55 +50,88 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Inicia la interfaz con `python main.py --ui`; el modo inicial es simulación.
-Elige `GNU Radio / HackRF` para que el botón inicie también el flowgraph.
+*(Nota: En Windows, GNU Radio y el soporte SoapySDR/HackRF se instalan por separado mediante Radioconda).*
 
-Esto instala PyQt6, PyQtGraph, NumPy, SciPy y pyzmq. GNU Radio y el soporte
-SoapySDR/HackRF se instalan por separado en un entorno compatible con GNU Radio;
-no se resuelven instalando PyQt6 con pip. Si GNU Radio está en otro entorno,
-define `GNURADIO_PYTHON` con la ruta a su `python.exe` antes de iniciar la UI.
-Por ejemplo, en PowerShell:
+---
 
-```powershell
-$env:GNURADIO_PYTHON = "C:\ruta\al\entorno-gnuradio\python.exe"
-python main.py --ui --mode live
+## Guía de Uso (`RADIOASTROLAB`)
+
+La ventana principal (`src/ui/main_window.py`) integra la recepción ZMQ, el cálculo astrofísico, el buffer de integración temporal, la sonificación y el despliegue gráfico. **No es necesario ejecutar `main.py` al usar la interfaz gráfica.**
+
+### Opción A: Modo Simulación y Grabación Previa (`.npz`) — *1 sola terminal*
+
+Ideal para demostraciones en entornos con alta interferencia de radiofrecuencia (como la **Noche de las Estrellas**) o pruebas sin hardware conectado:
+
+```bash
+python -m src.ui.main_window
 ```
 
-El worker de `src/ui/qt_bridge.py` puede iniciar/detener el flowgraph en modo
-`live`. Los cambios de tamaño FFT e integración se aplican al siguiente inicio,
-por lo que hay que detener la adquisición antes de cambiarlos. La calibración de
-50 Ohms se mantiene separada por tamaño FFT; si cambias la resolución, calibra
-ese tamaño antes de usar una referencia de ruido.
+Dentro de la interfaz puedes:
+* Seleccionar **`Grabación Noche de las Estrellas (.npz)`** en el menú `Escenario:` para reproducir datos reales previamente capturados en `data_samples/`.
+* Elegir cualquiera de los escenarios astrofísicos preconfigurados (nubes acercándose, brazo espiral alejándose, hidrógeno en reposo) o ajustar los deslizadores de **Velocidad**, **Pico HI** y **Ruido** en tiempo real.
+* Modificar el **Tiempo de integración (`1 s`, `5 s`, `15 s`)** para observar cómo el buffer circular reduce la varianza del piso de ruido térmico.
+* Activar **`🔊 Sonido: ON`** para escuchar la síntesis aditiva del espectro en tiempo real o usar **`Exportar captura`** para guardar los archivos `.csv`, `.json` y `.wav`.
 
-Este proyecto se desarrolla en colaboración con el **Instituto de Astronomía de la UNAM** y **Astrolab**, con aplicación directa en divulgación científica e instrumentación astronómica para la **Noche de las Estrellas** y **Universum, Museo de las Ciencias**.
+---
+
+### Opción B: Modo En Vivo con HackRF One + GNU Radio — *2 terminales*
+
+Para observar en directo con la antena corneta, el LNA/filtro SAWbird+ H1 y el HackRF One:
+
+1. **Terminal 1 — Iniciar el flujo de GNU Radio (Productor ZMQ en puerto `5555`):**
+   ```bash
+   python gnuradio/receptor_hi_flowgraph.py
+   ```
+   *(Deja esta terminal abierta; se encarga de leer el HackRF por USB, aplicar la FFT de 1024 puntos, restar la calibración `cal_50ohm.npy` y publicar en `tcp://127.0.0.1:5555`).*
+
+2. **Terminal 2 — Iniciar la Interfaz Gráfica (Consumidor ZMQ):**
+   ```bash
+   python -m src.ui.main_window
+   ```
+   Una vez abierta la ventana, haz clic en el botón **`En vivo`** de la barra inferior. El indicador superior cambiará a **`EN VIVO (HACKRF)`** y graficará la señal real de la antena.
+
+> **Calibración de piso de ruido (50 Ohms):** Si necesitas regenerar el vector de referencia `cal_50ohm.npy` antes de observar, coloca la carga terminadora de 50 Ohms en la entrada del receptor y ejecuta:
+> ```bash
+> python gnuradio/receptor_hi_flowgraph.py --calibrate
+> ```
+
+---
 
 ## Descripción Técnica
 
-El sistema reemplaza las etapas tradicionales de detección analógica posterior al acondicionamiento de radiofrecuencia (RF) mediante una arquitectura basada en Radio Definida por Software (SDR). El flujo de datos abarca desde la lectura de muestras complejas en cuadratura ($I/Q$) hasta la estimación de parámetros cinemáticos de nubes de gas galáctico mediante el Efecto Doppler.
+El sistema reemplaza las etapas tradicionales de detección analógica posterior al acondicionamiento de radiofrecuencia (RF) mediante una arquitectura basada en Radio Definida por Software (SDR). El flujo de datos abarca desde la lectura de muestras complejas en cuadratura (I/Q) hasta la estimación de parámetros cinemáticos de nubes de gas galáctico mediante el Efecto Doppler no relativista:
+
+`v_r = c * (f_0 - f) / f_0`
 
 ### Módulos Principales
 
 1. **Adquisición y Procesamiento en Banda Base (SDR / DSP):**
-   * Recepción de muestras digitales provenientes de un transceptor **HackRF One** e integración con flujos de procesamiento en **GNU Radio**.
-   * Cálculo de la Densidad Espectral de Potencia (PSD) mediante Transformada Rápida de Fourier (FFT) e integración temporal para incrementar la Relación Señal a Ruido (SNR).
-2. **Análisis Astrofísico:**
-   * Conversión del dominio de frecuencias al dominio de velocidades radiales ($v_r$) respecto a la frecuencia en reposo de la transición hiperfina del hidrógeno neutro ($f_0 = 1420.40575\text{ MHz}$).
-   * Estimación de flujo integrado y extracción de métricas de línea espectral.
-3. **Visualización Científica e Interfaz de Usuario:**
-   * Despliegue en tiempo real del espectro de potencia y espectrograma histórico (cascada / *waterfall*).
-   * Soporte para operación con hardware en vivo y modo de simulación mediante lecturas pregrabadas para entornos de prueba y exhibición.
+   * Recepción de muestras digitales provenientes de un transceptor **HackRF One** (frecuencia central de 1420.40575 MHz, ancho de banda de 2 MHz) e integración con **GNU Radio**.
+   * Cálculo de la Densidad Espectral de Potencia (PSD) mediante FFT de 1024 canales e integración temporal en potencia lineal para incrementar la Relación Señal a Ruido (SNR).
+2. **Análisis Astrofísico y Sonificación:**
+   * Sustracción automática de curvatura de línea base (*baseline* instrumental) mediante ajuste polinomial de segundo grado en los bordes de banda.
+   * Conversión del dominio de frecuencias al dominio de velocidades radiales (`v_r`), estimación de flujo integrado y síntesis de audio en tiempo real (`sonification.py`).
+3. **Visualización Científica e Interfaz de Usuario (`RADIOASTROLAB`):**
+   * Despliegue simultáneo del espectro en frecuencia (MHz), espectro en velocidad radial (km/s) con regiones Doppler y espectrograma histórico (*waterfall*).
+   * Conmutación en caliente entre hardware en vivo (`HackRFSource`), grabaciones reales (`.npz`) y simulador paramétrico interactivo.
 
 ## Arquitectura del Proyecto
 
 ```text
-radiotelescopio-ia/
-├── gnuradio/                # Flujos de procesamiento (.grc) y bloques embebidos en Python
-├── data_samples/            # Espectros preprocesados (.npz) para pruebas sin hardware
+RadioTelescopio-Instituto-de-Astronomia/
+├── gnuradio/
+│   └── receptor_hi_flowgraph.py  # Flowgraph de GNU Radio + bloque DSP y servidor ZMQ PUB
+├── data_samples/                 # Grabaciones reales (.npz) para reproducción y pruebas
 ├── src/
-│   ├── contracts.py         # Definición de estructuras de datos e interfaces entre módulos
-│   ├── acquisition/         # Control de hardware HackRF, comunicación ZMQ y modo simulación
-│   ├── physics/             # Algoritmos de conversión Doppler, velocidades radiales y flujo
-│   └── ui/                  # Interfaz gráfica y renderizado de series espectrales
-├── tests/                   # Pruebas unitarias de procesamiento numérico
-├── main.py                  # Punto de entrada de la aplicación
-└── requirements.txt         # Dependencias de Python
+│   ├── contracts.py              # Contratos de datos (RawSpectrumBlock, AstroMetrics, UIFramePacket)
+│   ├── acquisition/              # Fuentes de datos: HackRFSource (ZMQ) y MockSDRSource
+│   ├── physics/                  # Conversión Doppler, limpieza de baseline y sonificación WAV
+│   │   ├── hi_calculator.py
+│   │   └── sonification.py
+│   └── ui/                       # Interfaz gráfica PyQt6 + PyQtGraph
+│       ├── main_window.py        # Ventana principal RADIOASTROLAB
+│       └── qt_bridge.py          # Worker QThread y reproductor RecordedNPZSource
+├── cal_50ohm.npy                 # Vector de calibración de respuesta en frecuencia (50 Ohms)
+├── main.py                       # Script CLI de diagnóstico en consola
+└── requirements.txt              # Dependencias de Python
+```
