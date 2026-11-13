@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QSlider,
+    QDialog,
 )
 from src.contracts import HI_REST_FREQ_MHZ, SPEED_OF_LIGHT_KMS, RawSpectrumBlock
 from src.acquisition.hackrf_source import HackRFSource
@@ -85,7 +86,7 @@ class ConfigurableSimulationSource:
 class RadioTelescopioWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RADIOASTROLAB — Observación de hidrógeno neutro – 21 cm")
+        self.setWindowTitle("RADIOTELESCOPIO: La luz que no podemos ver — HI 21 cm")
         self.resize(1280, 690)
         self.setStyleSheet("""
             QMainWindow, QWidget { background-color: #060b19; color: #f8fafc; font-family: 'Segoe UI', sans-serif; }
@@ -127,47 +128,106 @@ class RadioTelescopioWindow(QMainWindow):
         self.timer.timeout.connect(self.process_next_frame)
 
         self._build_ui()
-        # Si inició en el primer elemento del combo (.npz) pero quiere usar sliders o npz:
         self.on_preset_changed(self.cmb_preset.currentText())
 
-    def _build_logos_bar(self, logo_height: int = 28) -> QHBoxLayout:
-        """Carga automáticamente los logos (.png, .jpg, .jpeg, .svg) de assets/logos/."""
+    @staticmethod
+    def _is_nde_logo(path: Path) -> bool:
+        """Detecta si el archivo corresponde al logo de Noche de las Estrellas (ej. LOGO NDE.png)."""
+        stem = path.stem.lower()
+        return any(k in stem for k in ("nde", "noche", "estrella"))
+
+    @staticmethod
+    def _autocrop_and_enhance(img: QImage, is_jpg: bool, is_nde: bool) -> QImage:
+        """
+        1. Quita fondo blanco en JPGs.
+        2. Recorta automáticamente todos los márgenes transparentes vacíos (autocrop)
+           para que el logo aproveche el 100% de la altura asignada.
+        3. Si el logo tiene trazos negros/muy oscuros sobre fondo transparente, los pasa a blanco.
+        """
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+        w, h = img.width(), img.height()
+
+        if is_jpg:
+            for y in range(h):
+                for x in range(w):
+                    c = img.pixelColor(x, y)
+                    if c.red() > 235 and c.green() > 235 and c.blue() > 235:
+                        c.setAlpha(0)
+                        img.setPixelColor(x, y, c)
+
+        # Buscar la caja delimitadora (bounding box) real de los píxeles visibles
+        min_x, min_y, max_x, max_y = w, h, 0, 0
+        lum_sum, count = 0.0, 0
+
+        for y in range(h):
+            for x in range(w):
+                c = img.pixelColor(x, y)
+                if c.alpha() > 25:
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+                    lum_sum += 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+                    count += 1
+
+        if max_x >= min_x and max_y >= min_y:
+            img = img.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+
+        # Si el logo no es el de NDE y es demasiado oscuro (trazos negros), invertirlo a claro
+        avg_lum = (lum_sum / count) if count > 0 else 255.0
+        if not is_nde and avg_lum < 95.0:
+            cw, ch = img.width(), img.height()
+            for y in range(ch):
+                for x in range(cw):
+                    c = img.pixelColor(x, y)
+                    if c.alpha() > 25:
+                        c.setRed(255 - c.red())
+                        c.setGreen(255 - c.green())
+                        c.setBlue(255 - c.blue())
+                        img.setPixelColor(x, y, c)
+
+        return img
+
+    def _build_logos_bar(self, logo_height: int = 52, nde_logo_height: int = 52) -> QHBoxLayout:
+        """Carga, recorta márgenes vacíos y escala los logos de assets/logos/."""
         logos_layout = QHBoxLayout()
-        logos_layout.setContentsMargins(8, 0, 8, 0)
-        logos_layout.setSpacing(10)
+        logos_layout.setContentsMargins(6, 0, 6, 0)
+        logos_layout.setSpacing(12)
 
         logos_dir = Path(__file__).resolve().parents[2] / "assets" / "logos"
         if not logos_dir.exists():
             return logos_layout
 
-        archivos = sorted(
+        archivos = [
             p for p in logos_dir.iterdir()
             if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".svg")
-        )
+        ]
+        archivos.sort(key=lambda p: (0 if self._is_nde_logo(p) else 1, p.name.lower()))
 
-        for logo_path in archivos:
-            # Si es JPG con fondo blanco, lo convertimos a RGBA y hacemos transparente el blanco
-            if logo_path.suffix.lower() in (".jpg", ".jpeg"):
-                img = QImage(str(logo_path)).convertToFormat(QImage.Format.Format_ARGB32)
-                for y in range(img.height()):
-                    for x in range(img.width()):
-                        c = img.pixelColor(x, y)
-                        if c.red() > 235 and c.green() > 235 and c.blue() > 235:
-                            c.setAlpha(0)
-                            img.setPixelColor(x, y, c)
-                pix = QPixmap.fromImage(img)
-            else:
-                pix = QPixmap(str(logo_path))
+        for idx, logo_path in enumerate(archivos):
+            raw_img = QImage(str(logo_path))
+            if raw_img.isNull():
+                continue
 
+            is_nde = self._is_nde_logo(logo_path) or idx == 0
+            is_jpg = logo_path.suffix.lower() in (".jpg", ".jpeg")
+            clean_img = self._autocrop_and_enhance(raw_img, is_jpg=is_jpg, is_nde=is_nde)
+
+            pix = QPixmap.fromImage(clean_img)
             if not pix.isNull():
                 lbl = QLabel()
+                target_h = nde_logo_height if is_nde else logo_height
                 scaled_pix = pix.scaledToHeight(
-                    logo_height, Qt.TransformationMode.SmoothTransformation
+                    target_h, Qt.TransformationMode.SmoothTransformation
                 )
                 lbl.setPixmap(scaled_pix)
-                # Si algún logo es negro y no se ve en el fondo oscuro, cambia 'transparent' por '#f1f5f9'
+                lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
                 lbl.setStyleSheet(
-                    "background-color: transparent; border-radius: 4px; padding: 2px 4px;"
+                    "background-color: transparent; border: none; padding: 0px 2px;"
                 )
                 lbl.setToolTip(logo_path.stem.lstrip("0123456789_- ").replace("_", " ").upper())
                 logos_layout.addWidget(lbl)
@@ -181,17 +241,32 @@ class RadioTelescopioWindow(QMainWindow):
         root.setContentsMargins(14, 8, 14, 8)
         root.setSpacing(6)
 
+        # ================= ENCABEZADO COMPACTO + COORDENADAS + LOGOS =================
         header = QHBoxLayout()
         header.setSpacing(10)
 
-        lbl_title = QLabel("RADIOASTROLAB")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: 800; letter-spacing: 1px; color: #ffffff;")
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
+        title_box.setContentsMargins(0, 0, 0, 0)
+
+        top_title_row = QHBoxLayout()
+        top_title_row.setSpacing(8)
+        lbl_title = QLabel("RADIOTELESCOPIO:")
+        lbl_title.setStyleSheet("font-size: 15px; font-weight: 800; letter-spacing: 0.8px; color: #ffffff;")
         lbl_sub = QLabel("HI – 21 cm")
         lbl_sub.setStyleSheet("font-size: 11px; color: #f59e0b; font-weight: bold;")
+        top_title_row.addWidget(lbl_title)
+        top_title_row.addWidget(lbl_sub)
+        top_title_row.addStretch()
 
-        header.addWidget(lbl_title)
-        header.addWidget(lbl_sub)
-        header.addSpacing(12)
+        lbl_tagline = QLabel("La luz que no podemos ver")
+        lbl_tagline.setStyleSheet("font-size: 11px; font-style: italic; color: #38bdf8; font-weight: 600;")
+
+        title_box.addLayout(top_title_row)
+        title_box.addWidget(lbl_tagline)
+
+        header.addLayout(title_box)
+        header.addSpacing(8)
 
         header.addWidget(self._make_inline_pill("AR:", "18h 36m 00s"))
         header.addWidget(self._make_inline_pill("DEC:", "−08° 30′ 00″"))
@@ -199,10 +274,8 @@ class RadioTelescopioWindow(QMainWindow):
         header.addWidget(self.pill_int)
 
         header.addStretch()
-        header.addLayout(self._build_logos_bar(logo_height=26))
+        header.addLayout(self._build_logos_bar(logo_height=28, nde_logo_height=42))
         header.addStretch()
-
-        self.badge_mode = QLabel("SIMULACIÓN")
 
         self.badge_mode = QLabel("SIMULACIÓN")
         self.badge_mode.setStyleSheet(
@@ -218,6 +291,7 @@ class RadioTelescopioWindow(QMainWindow):
         header.addWidget(self.badge_state)
         root.addLayout(header)
 
+        # ================= FILA PRINCIPAL: DOS GRÁFICAS GRANDES LADO A LADO =================
         pg.setConfigOptions(antialias=True)
         row_plots = QHBoxLayout()
         row_plots.setSpacing(8)
@@ -292,6 +366,7 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addLayout(row_plots, stretch=5)
 
+        # ================= FILA DE MÉTRICAS COMPACTA =================
         row_metrics = QHBoxLayout()
         row_metrics.setSpacing(8)
 
@@ -357,6 +432,7 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addLayout(row_metrics, stretch=0)
 
+        # ================= CASCADA · HISTORIAL DEL ESPECTRO =================
         wf_card = QFrame()
         wf_card.setObjectName("Card")
         wf_lay = QVBoxLayout(wf_card)
@@ -379,6 +455,7 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addWidget(wf_card, stretch=4)
 
+        # ================= PANEL DE PARÁMETROS DE SIMULACIÓN =================
         sim_card = QFrame()
         sim_card.setObjectName("Card")
         sim_lay = QHBoxLayout(sim_card)
@@ -423,6 +500,7 @@ class RadioTelescopioWindow(QMainWindow):
 
         root.addWidget(sim_card, stretch=0)
 
+        # ================= CONTROLES INFERIORES =================
         controls = QHBoxLayout()
         controls.setSpacing(8)
 
@@ -453,6 +531,9 @@ class RadioTelescopioWindow(QMainWindow):
         self.btn_audio = QPushButton("🔇 Sonido: OFF")
         self.btn_audio.clicked.connect(self.toggle_audio)
 
+        self.btn_credits = QPushButton("👥 Créditos")
+        self.btn_credits.clicked.connect(self.show_credits_dialog)
+
         self.btn_export = QPushButton("Exportar captura")
         self.btn_export.clicked.connect(self.export_data)
 
@@ -467,6 +548,7 @@ class RadioTelescopioWindow(QMainWindow):
         controls.addSpacing(6)
         controls.addWidget(self.btn_audio)
         controls.addStretch()
+        controls.addWidget(self.btn_credits)
         controls.addWidget(self.btn_export)
 
         root.addLayout(controls, stretch=0)
@@ -488,8 +570,107 @@ class RadioTelescopioWindow(QMainWindow):
         pill.val_label = lbl_v  # type: ignore
         return pill
 
+    def show_credits_dialog(self):
+        """Muestra una ventana emergente con los créditos de los 3 equipos participantes."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Créditos — RADIOTELESCOPIO: La luz que no podemos ver")
+        dlg.setMinimumWidth(700)
+        dlg.setStyleSheet("""
+            QDialog { background-color: #060b19; color: #f8fafc; }
+            QFrame#TeamCard { background-color: #0d152a; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; }
+            QLabel { border: none; background: transparent; }
+        """)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(14)
+
+        hdr = QLabel("RADIOTELESCOPIO: La luz que no podemos ver")
+        hdr.setStyleSheet("font-size: 17px; font-weight: 800; color: #ffffff;")
+        hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        sub = QLabel(
+            "Observación de la línea de hidrógeno neutro a 21 cm (1420.405 MHz)\n"
+            "Instituto de Astronomía UNAM · Noche de las Estrellas · Astrolab"
+        )
+        sub.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 600;")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        lay.addWidget(hdr)
+        lay.addWidget(sub)
+
+        teams_row = QHBoxLayout()
+        teams_row.setSpacing(12)
+
+        #TODO Agregar los nombres de los integrantes de los equipos 2 y 3
+        equipos = [
+            (
+                "1. Software, DSP e Interfaz",
+                "#f59e0b",
+                [
+                    "Ing. Leonardo Garces",
+                    "Alan Vladimir Alonso Sánchez",
+                    "Ricardo Ramirez Flores",
+                    "Katia Denisse Rayon Martínez",
+                ],
+            ),
+            (
+                "2. Instrumentación y RF / Antena",
+                "#38bdf8",
+                [
+                    "Ejemplo:",
+                    "Integrante 1 (Equipo 2)",
+                    "Integrante 2 (Equipo 2)",
+                    "Integrante 3 (Equipo 2)",
+                ],
+            ),
+            (
+                "3. Mecánica, Montura y Divulgación",
+                "#34d399",
+                [
+                    "Integrante 1 (Equipo 3)",
+                    "Integrante 2 (Equipo 3)",
+                    "Integrante 3 (Equipo 3)",
+                ],
+            ),
+        ]
+
+        for titulo_eq, color_hex, miembros in equipos:
+            card = QFrame()
+            card.setObjectName("TeamCard")
+            c_lay = QVBoxLayout(card)
+            c_lay.setSpacing(6)
+
+            lbl_eq = QLabel(titulo_eq)
+            lbl_eq.setWordWrap(True)
+            lbl_eq.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {color_hex};")
+            c_lay.addWidget(lbl_eq)
+
+            for m in miembros:
+                lbl_m = QLabel(f"• {m}")
+                lbl_m.setWordWrap(True)
+                lbl_m.setStyleSheet("font-size: 11px; color: #e2e8f0;")
+                c_lay.addWidget(lbl_m)
+
+            c_lay.addStretch()
+            teams_row.addWidget(card)
+
+        lay.addLayout(teams_row)
+
+        btn_close = QPushButton("Cerrar")
+        btn_close.setFixedWidth(120)
+        btn_close.clicked.connect(dlg.accept)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        dlg.exec()
+
     def on_preset_changed(self, name: str):
-        self.history_buffer.clear()  # Reiniciar buffer al cambiar de escenario para ver el cambio al instante
+        self.history_buffer.clear()
         self.source.apply_preset(name)
 
         if self.source.use_npz:
@@ -571,7 +752,6 @@ class RadioTelescopioWindow(QMainWindow):
                         sample_rate_mhz=2.0,
                         integration_time_s=self.integration_s,
                     )
-                # Probar primera lectura real de ZMQ para verificar que GNU Radio está activo
                 _ = self.live_source.read_spectrum()
                 self.mode = "live"
                 self.badge_mode.setText("EN VIVO (HACKRF)")
@@ -590,7 +770,6 @@ class RadioTelescopioWindow(QMainWindow):
                 )
             return
 
-        # Modo simulación
         if self.live_source is not None:
             self.live_source.close()
             self.live_source = None
@@ -615,14 +794,12 @@ class RadioTelescopioWindow(QMainWindow):
                 raw_block = self.live_source.read_spectrum()
             else:
                 raw_block = self.source.read_spectrum()
-        except Exception as exc:
-            # Si GNU Radio se cierra en medio de la sesión, regresar a simulación sin crashear
+        except Exception:
             self.switch_mode("simulation")
             return
 
         raw_block.integration_time_s = self.integration_s
 
-        # Promediado real en buffer circular según el selector de Integración (1s=10, 5s=50, 15s=150 frames)
         target_frames = max(1, int(self.integration_s * 10))
         self.history_buffer.append(np.asarray(raw_block.power_db, dtype=float).copy())
         while len(self.history_buffer) > target_frames:
